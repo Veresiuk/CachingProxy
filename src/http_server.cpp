@@ -192,7 +192,7 @@ void HttpServer::start() {
 
     HttpResponse response = client.sendRequest(request);
 
-    std::cout << "[ORIGIN]   Request sent" << std::endl;
+    std::cout << "[ORIGIN]   Response received" << std::endl;
 
     if (response.statusCode == 0) {
 
@@ -202,7 +202,6 @@ void HttpServer::start() {
         continue;
     }
 
-    std::cout << "Origin response received" << std::endl;
 
     std::string statusText;
 
