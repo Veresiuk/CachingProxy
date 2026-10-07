@@ -3,14 +3,24 @@
 #include <winsock2.h>
 #include <ws2tcpip.h>
 #include <iostream>
-#include <filesystem>
 #include <sstream>
 #include <string>
+#include <chrono>
 
 #pragma comment(lib, "ws2_32.lib")
 
 HttpServer::HttpServer(int port, Cache& cache, HttpClient& client) : port(port), cache(cache), client(client) {
 
+}
+
+void HttpServer::clearCache() {
+    cache.clear();
+
+    std::cout << "[CACHE] Cache cleared" << std::endl;
+}
+
+void HttpServer::stop() {
+    running = false;
 }
 
 void HttpServer::start() {
@@ -75,15 +85,35 @@ void HttpServer::start() {
     std::cout << "Server started on port " << port << std::endl;
     std::cout << "Waiting for requests..." << std::endl;
 
-    while (true) {
+    while (running) {
 
-        if (std::filesystem::exists("clear_cache.flag")) {
+    fd_set readSet;
 
-            cache.clear();
+    FD_ZERO(&readSet);
+    FD_SET(serverSocket, &readSet);
 
-            std::filesystem::remove("clear_cache.flag");
+    timeval timeout{};
+    timeout.tv_sec = 0;
+    timeout.tv_usec = 100000;
 
-            std::cout << "Cache cleared successfully" << std::endl;
+    int selectResult = select (
+        0,
+        &readSet,
+        nullptr,
+        nullptr,
+        &timeout
+    );
+
+    if (selectResult == SOCKET_ERROR) {
+
+        std::cout << "Select failed" << std::endl;
+        break;
+
+    }
+
+    if (selectResult == 0) {
+
+        continue;
     }
     
     SOCKET clientSocket = accept(
@@ -151,11 +181,82 @@ void HttpServer::start() {
     std::cout << "Path: " << path << std::endl;
     std::cout << "Version: " << version << std::endl;
 
-    Request request(method, path);
+    size_t headerEnd = rawRequest.find("\r\n\r\n");
+
+    std::string headers;
+    std::string body;
+
+    if (headerEnd != std::string::npos) {
+
+        headers = rawRequest.substr(
+            0,
+            headerEnd
+        );
+
+        body = rawRequest.substr(
+            headerEnd + 4
+        );
+    }
+
+    std::string sender;
+    std::string senderHeader = "X-Sender:";
+
+    size_t senderPosition = headers.find(senderHeader);
+
+    if (senderPosition != std::string::npos) {
+
+        size_t valueStart = senderPosition + senderHeader.size();
+
+        while (
+            valueStart < headers.size() && headers[valueStart] == ' '
+        ) {
+            valueStart++;
+        }
+
+        size_t valueEnd = headers.find("\r\n", valueStart);
+
+        sender = headers.substr(valueStart, valueEnd - valueStart);
+
+    }
+
+    std::string recipient;
+    std::string recipientHeader = "X-Recipient:";
+
+    size_t recipientPosition = headers.find(recipientHeader);
+
+    if(recipientPosition != std::string::npos) {
+
+        size_t valueStart = recipientPosition + recipientHeader.size();
+
+        while (
+            valueStart < headers.size() && headers[valueStart] == ' '
+        ) {
+            valueStart++;
+        }
+
+        size_t valueEnd = headers.find("\r\n", valueStart);
+
+        recipient = headers.substr(valueStart, valueEnd - valueStart);
+    }
+
+    std::cout << "Sender: " << sender << std::endl;
+    std::cout << "Recipient: " << recipient << std::endl;
+    std::cout << "Body: " << body << std::endl;
+
+    Request request(
+        method,
+        path,
+        body,
+        sender,
+        recipient
+    );
 
     std::cout << "\n[REQUEST] " << request.getMethod() << " " << request.getPath() << std::endl;
+
+    bool cacheable =
+        client.isCacheable(request);
     
-    if (cache.contains(path)) {
+    if (cacheable && cache.contains(path)) {
 
         std::cout << "[CACHE]    HIT" << std::endl;
 
@@ -188,9 +289,38 @@ void HttpServer::start() {
         continue;
     }
 
-    std::cout << "[CACHE]    MISS" << std::endl;
+    if (cacheable) {
+
+        std::cout << "[CACHE]    MISS" << std::endl;
+
+    }
+    else {
+
+        std::cout << "[CACHE]    BYPASS" << std::endl;
+
+    }
+    
 
     HttpResponse response = client.sendRequest(request);
+
+    if (response.statusCode == 0) {
+        std::string errorResponse =
+            "HTTP/1.1 502 Bad Gateway\r\n"
+            "Content-Length: 0\r\n"
+            "Connection: close\r\n"
+            "\r\n";
+
+        send(
+            clientSocket,
+            errorResponse.c_str(),
+            static_cast<int>(errorResponse.size()),
+            0
+        );
+
+        closesocket(clientSocket);
+
+        continue;
+    }
 
     std::cout << "[ORIGIN]   Response received" << std::endl;
 
@@ -208,10 +338,16 @@ void HttpServer::start() {
     if (response.statusCode == 200) {
         statusText = "OK";
     }
+    else if (response.statusCode == 201) {
+        statusText = "Created";
+    }
+    else if (response.statusCode == 400) {
+        statusText = "Bad Request";
+    }
     else if (response.statusCode == 404) {
         statusText = "Not Found";
     }
-    else if(response.statusCode == 500) {
+    else if (response.statusCode == 500) {
         statusText = "Internal Server Error";
     }
     else {
@@ -227,25 +363,31 @@ void HttpServer::start() {
     if (firstLineEnd != std::string::npos) {
 
         responseHeaders = responseHeaders.substr(firstLineEnd + 2);
+    }
 
-    size_t transferEncodingPosition =
-        responseHeaders.find("Transfer-Encoding: chunked\r\n");
+    size_t transferEncodingPosition = responseHeaders.find("Transfer-Encoding: chunked\r\n");
 
     if (transferEncodingPosition != std::string::npos) {
 
         responseHeaders.erase(
             transferEncodingPosition,
-            std::string("Transfer-Encoding: chunked\r\n").size()
+            std::string("Transfer-Encoding: chunked\r\n").size());
+    }
+
+    while (
+        responseHeaders.size() >= 2 &&
+        responseHeaders.compare(
+            responseHeaders.size() - 2,
+            2,
+            "\r\n"
+        ) == 0
+    ) {
+        responseHeaders.erase(
+            responseHeaders.size() - 2
         );
-
     }
 
-    responseHeaders +=
-        "Content-Length: " +
-        std::to_string(response.body.size()) +
-        "\r\n";
-
-    }
+    responseHeaders += "Content-Length: " + std::to_string(response.body.size()) + "\r\n";
 
     std::string httpResponse =
         "HTTP/1.1 " +
@@ -253,30 +395,48 @@ void HttpServer::start() {
         " " +
         statusText +
         "\r\n" +
-        responseHeaders +
-        "X-Cache: MISS\r\n" +
-        "\r\n" +
-        response.body;
+        responseHeaders;
 
-    cache.set(path, httpResponse);
-    std::cout << "[CACHE]    Response saved" << std::endl;
+    if (cacheable) {
 
-    int bytesSent = send(
-        clientSocket,
-        httpResponse.c_str(),
-        static_cast<int>(httpResponse.size()),
-        0
-    );
-
-    if (bytesSent == SOCKET_ERROR) {
-
-    std::cout << "Failed to send response" << std::endl;
+        httpResponse += "X-Cache: MISS\r\n";
 
     }
-    else {
 
-    std::cout << "[CLIENT]   Response sent" << std::endl;
+    httpResponse +=
+        "\r\n" + response.body;
 
+    if (cacheable) {
+
+        cache.set(path, httpResponse);
+
+        std::cout << "[CACHE]    Response saved" << std::endl;
+}
+
+    size_t totalSent = 0;
+
+    while (totalSent < httpResponse.size()) {
+
+        int bytesSent = send(
+            clientSocket,
+            httpResponse.c_str() + totalSent,
+            static_cast<int>(httpResponse.size() - totalSent),
+            0
+        );
+
+        if (bytesSent == SOCKET_ERROR) {
+
+            std::cout << "Failed to send response" << std::endl;
+
+            break;
+        }
+
+        totalSent += bytesSent;
+    }
+
+    if (totalSent == httpResponse.size()) {
+
+        std::cout << "[CLIENT]   Response sent" << std::endl;
     }
 
     closesocket(clientSocket);

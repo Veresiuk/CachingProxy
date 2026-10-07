@@ -1,20 +1,47 @@
 #include "request.h"
 
-Request::Request(const std::string& method, const std::string& path) {
+Request::Request(
+    const std::string& method, 
+    const std::string& path,
+    const std::string& body,
+    const std::string& sender,
+    const std::string& recipient
+) 
 
-    this->method = method;
-    this->path = path;
-
+    : method(method),
+      path(path),
+      body(body),
+      sender(sender),
+      recipient(recipient)
+{
 }
 
-std::string Request::getMethod() const {
+const std::string& Request::getMethod() const {
 
     return method;
 
 }
 
-std::string Request::getPath() const {
+const std::string& Request::getPath() const {
 
     return path;
+    
+}
+
+const std::string& Request::getBody() const {
+
+    return body;
+
+}
+
+const std::string& Request::getSender() const {
+
+    return sender;
+
+}
+
+const std::string& Request::getRecipient() const {
+
+    return recipient;
     
 }

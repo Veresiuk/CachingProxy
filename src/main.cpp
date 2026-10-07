@@ -4,27 +4,9 @@
 
 #include <iostream>
 #include <string>
-#include <fstream>
+#include <thread>
 
 int main(int argc, char* argv[]) {
-
-    if (argc == 2 && std::string(argv[1]) == "--clear-cache") {
-
-    std::ofstream clearFile("clear_cache.flag");
-
-    if (!clearFile) {
-
-        std::cout << "Failed to clear cache" << std::endl;
-
-        return 1;
-    }
-
-    clearFile.close();
-
-    std::cout << "Cache clear requested successfully" << std::endl;
-
-    return 0;
-    }
 
     if (argc != 5) {
 
@@ -71,7 +53,46 @@ int main(int argc, char* argv[]) {
         client
     );
 
-    server.start();
+    std::thread serverThread([&server]() {
+        server.start();
+    }
+);
+
+    std::string command;
+
+    while (true) {
+
+        std::getline(std::cin, command);
+
+        if (command == "clear-cache") {
+
+            server.clearCache();
+
+        }
+        else if (command == "help") {
+
+            std::cout << "Available commands:" << std::endl;
+            std::cout << "  clear-cache  - clear response cache" << std::endl;
+            std::cout << "  help         - show available commands" << std::endl;
+            std::cout << "  exit         - stop proxy server" << std::endl;
+
+        }
+        else if (command == "exit") {
+
+            server.stop();
+
+            break;
+
+        }
+        else if (!command.empty()) {
+
+            std::cout << "Unknown command: " << command << std::endl;
+            std::cout << "Type 'help' to see available commands." << std::endl;
+
+        }
+    }
+
+    serverThread.join();
 
     return 0;
 }

@@ -2,12 +2,14 @@
 
 #include <string>
 #include <unordered_map>
+#include <mutex>
 
 
 class Cache {
     private:
 
     std::unordered_map <std::string, std::string> cache;
+    mutable std::mutex mutex;
 
     public:
 

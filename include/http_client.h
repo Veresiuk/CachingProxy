@@ -2,25 +2,21 @@
 
 #include <string>
 #include "request.h"
-
-struct HttpResponse {
-
-    int statusCode;
-    std::string headers;
-    std::string body;
-
-};
+#include "curl_transport.h"
 
 class HttpClient {
 
     private:
 
     std::string origin;
+    CurlTransport transport;
 
     public:
 
-    HttpClient(const std::string& origin);
+    explicit HttpClient(const std::string& origin);
 
     HttpResponse sendRequest(const Request& request);
+
+    bool isCacheable(const Request& request) const;
 
 };
