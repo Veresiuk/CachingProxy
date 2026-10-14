@@ -1,159 +1,172 @@
 #include "curl_transport.h"
 
+#include "protocols/http_transport.h"
+#include "protocols/ftp_transport.h"
+#include "protocols/smtp_transport.h"
+
 #include <curl/curl.h>
 
-#include <iostream>
 #include <string>
 #include <algorithm>
+#include <cctype>
+#include <sstream>
+#include <iostream>
 
 namespace {
 
-// Зберігає тіло відповіді.
+    struct ResponseData {
+        std::string body;
+        std::string headers;
+};
+
+    struct UploadData {
+        std::string message;
+        std::size_t position = 0;
+};
+
 size_t writeBodyCallback(
     char* data,
     size_t size,
     size_t count,
     void* userData
 ) {
-    size_t totalSize = size * count;
+    const size_t totalSize = size * count;
 
-    auto* responseBody =
-        static_cast<std::string*>(userData);
-
-    responseBody->append(
-        data,
-        totalSize
-    );
+    auto* response = static_cast<ResponseData*>(userData);
+    response->body.append(data, totalSize);
 
     return totalSize;
 }
 
-// Зберігає заголовки відповіді.
 size_t writeHeaderCallback(
     char* data,
     size_t size,
     size_t count,
     void* userData
 ) {
-    size_t totalSize = size * count;
+    const size_t totalSize = size * count;
 
-    auto* responseHeaders =
-        static_cast<std::string*>(userData);
-
-    responseHeaders->append(
-        data,
-        totalSize
-    );
+    auto* response = static_cast<ResponseData*>(userData);
+    response->headers.append(data, totalSize);
 
     return totalSize;
 }
 
-// Передає дані SMTP.
 size_t readBodyCallback(
     char* buffer,
     size_t size,
     size_t count,
     void* userData
 ) {
-    auto* data =
-        static_cast<std::string*>(userData);
+    auto* upload = static_cast<UploadData*>(userData);
 
-    size_t bufferSize =
-        size * count;
+    const size_t bufferSize = size * count;
+    const size_t remaining =
+        upload->message.size() - upload->position;
 
-    if (data->empty()) {
-        return 0;
+    const size_t bytesToCopy =
+        (std::min)(bufferSize, remaining);
+
+    if (bytesToCopy > 0) {
+        std::copy_n(
+            upload->message.data() + upload->position,
+            bytesToCopy,
+            buffer
+        );
+
+        upload->position += bytesToCopy;
     }
-
-    size_t bytesToCopy =
-        data->size() < bufferSize
-            ? data->size()
-            : bufferSize;
-
-    std::copy(
-        data->begin(),
-        data->begin() + bytesToCopy,
-        buffer
-    );
-
-    data->erase(
-        0,
-        bytesToCopy
-    );
 
     return bytesToCopy;
 }
 
-// Перевіряє HTTP.
-bool isHttp(
-    const std::string& scheme
-) {
-    return scheme == "http";
+    std::string buildUrl(
+        const std::string& scheme,
+        const std::string& host,
+        int port,
+            const std::string& path
+    ) {
+
+    std::string url = scheme + "://" + host;
+
+    if (port > 0) {
+        url += ":" + std::to_string(port);
+    }
+
+    if (scheme == "http" || scheme == "https") {
+        if (path.empty()) {
+            url += "/";
+        } else if (path.front() == '/') {
+            url += path;
+        } else {
+            url += "/" + path;
+        }
+    } else if (scheme == "ftp") {
+        if (!path.empty()) {
+            if (path.front() == '/') {
+                url += path;
+            } else {
+                url += "/" + path;
+            }
+        }
+    }
+
+    return url;
 }
 
-// Перевіряє HTTPS.
-bool isHttps(
-    const std::string& scheme
-) {
-    return scheme == "https";
+bool isHttpProtocol(const std::string& scheme) {
+    return scheme == "http" || scheme == "https";
 }
 
-// Перевіряє FTP.
-bool isFtp(
-    const std::string& scheme
-) {
-    return scheme == "ftp";
+bool isSmtpProtocol(const std::string& scheme) {
+    return scheme == "smtp" || scheme == "smtps";
 }
 
-// Перевіряє SMTP.
-bool isSmtp(
-    const std::string& scheme
-) {
-    return scheme == "smtp";
 }
 
-// Перевіряє SMTPS.
-bool isSmtps(
-    const std::string& scheme
+HttpResponse CurlTransport::send(
+    const std::string& scheme,
+    const std::string& host,
+    int port,
+    const std::string& username,
+    const std::string& password,
+    const std::string& method,
+    const std::string& path,
+    const std::string& body,
+    const std::string& sender,
+    const std::string& recipient
 ) {
-    return scheme == "smtps";
-}
+    static const CURLcode globalInitResult =
+        curl_global_init(CURL_GLOBAL_DEFAULT);
 
-// Налаштовує спільні параметри.
-void configureCommonOptions(
-    CURL* curl,
-    const std::string& url,
-    std::string& responseBody,
-    std::string& responseHeaders
-) {
+    HttpResponse result;
+
+    if (globalInitResult != CURLE_OK) {
+        return result;
+    }
+
+    CURL* curl = curl_easy_init();
+
+    if (curl == nullptr) {
+        return result;
+    }
+
+    ResponseData response;
+    UploadData upload;
+
+    curl_slist* recipients = nullptr;
+
+    const std::string url = buildUrl(
+        scheme,
+        host,
+        port,
+        path
+    );
+
     curl_easy_setopt(
         curl,
         CURLOPT_URL,
         url.c_str()
-    );
-
-    curl_easy_setopt(
-        curl,
-        CURLOPT_WRITEFUNCTION,
-        writeBodyCallback
-    );
-
-    curl_easy_setopt(
-        curl,
-        CURLOPT_WRITEDATA,
-        &responseBody
-    );
-
-    curl_easy_setopt(
-        curl,
-        CURLOPT_HEADERFUNCTION,
-        writeHeaderCallback
-    );
-
-    curl_easy_setopt(
-        curl,
-        CURLOPT_HEADERDATA,
-        &responseHeaders
     );
 
     curl_easy_setopt(
@@ -173,16 +186,32 @@ void configureCommonOptions(
         CURLOPT_TIMEOUT,
         60L
     );
-}
 
-// Налаштовує авторизацію.
-void configureCredentials(
-    CURL* curl,
-    const std::string& username,
-    const std::string& password
-) {
+    curl_easy_setopt(
+        curl,
+        CURLOPT_WRITEFUNCTION,
+        writeBodyCallback
+    );
+
+    curl_easy_setopt(
+        curl,
+        CURLOPT_WRITEDATA,
+        &response
+    );
+
+    curl_easy_setopt(
+        curl,
+        CURLOPT_HEADERFUNCTION,
+        writeHeaderCallback
+    );
+
+    curl_easy_setopt(
+        curl,
+        CURLOPT_HEADERDATA,
+        &response
+    );
+
     if (!username.empty()) {
-
         curl_easy_setopt(
             curl,
             CURLOPT_USERNAME,
@@ -191,407 +220,114 @@ void configureCredentials(
     }
 
     if (!password.empty()) {
-
         curl_easy_setopt(
             curl,
             CURLOPT_PASSWORD,
             password.c_str()
         );
     }
-}
 
-// Налаштовує HTTP.
-void configureHttp(
-    CURL* curl,
-    const std::string& method,
-    const std::string& body
-) {
-    curl_easy_setopt(
-        curl,
-        CURLOPT_CUSTOMREQUEST,
-        method.c_str()
-    );
-
-    if (!body.empty()) {
-
-        curl_easy_setopt(
-            curl,
-            CURLOPT_POSTFIELDS,
-            body.c_str()
-        );
-    }
-}
-
-// Налаштовує HTTPS.
-void configureHttps(
-    CURL* curl,
-    const std::string& method,
-    const std::string& body
-) {
-
-    curl_easy_setopt(
-        curl,
-        CURLOPT_CUSTOMREQUEST,
-        method.c_str()
-    );
-
-    if (!body.empty()) {
-        curl_easy_setopt(
-            curl,
-            CURLOPT_POSTFIELDS,
-            body.c_str()
-        );
-    }
-
-    curl_easy_setopt(
-        curl,
-        CURLOPT_SSL_VERIFYPEER,
-        1L
-    );
-
-    curl_easy_setopt(
-        curl,
-        CURLOPT_SSL_VERIFYHOST,
-        2L
-    );
-}
-
-// Налаштовує FTP.
-void configureFtp(
-    CURL* curl
-) {
-    curl_easy_setopt(
-        curl,
-        CURLOPT_DIRLISTONLY,
-        0L
-    );
-}
-
-// Налаштовує SMTP.
-void configureSmtp(
-    CURL* curl,
-    const std::string& sender,
-    const std::string& recipient,
-    std::string& message,
-    struct curl_slist*& recipients
-) {
-    if (!sender.empty()) {
-
-        curl_easy_setopt(
-            curl,
-            CURLOPT_MAIL_FROM,
-            sender.c_str()
-        );
-    }
-
-    if (!recipient.empty()) {
-
-        recipients =
-            curl_slist_append(
-                recipients,
-                recipient.c_str()
-            );
-
-        curl_easy_setopt(
-            curl,
-            CURLOPT_MAIL_RCPT,
-            recipients
-        );
-    }
-
-    curl_easy_setopt(
-        curl,
-        CURLOPT_READFUNCTION,
-        readBodyCallback
-    );
-
-    curl_easy_setopt(
-        curl,
-        CURLOPT_READDATA,
-        &message
-    );
-
-    curl_easy_setopt(
-        curl,
-        CURLOPT_UPLOAD,
-        1L
-    );
-
-    curl_easy_setopt(
-        curl,
-        CURLOPT_INFILESIZE_LARGE,
-        static_cast<curl_off_t>(
-            message.size()
-        )
-    );
-}
-
-// Налаштовує SMTPS.
-void configureSmtps(
-    CURL* curl
-) {
-    curl_easy_setopt(
-        curl,
-        CURLOPT_SSL_VERIFYPEER,
-        1L
-    );
-
-    curl_easy_setopt(
-        curl,
-        CURLOPT_SSL_VERIFYHOST,
-        2L
-    );
-}
-
-} // namespace
-
-HttpResponse CurlTransport::send(
-    const std::string& scheme,
-    const std::string& host,
-    int port,
-    const std::string& username,
-    const std::string& password,
-    const std::string& method,
-    const std::string& path,
-    const std::string& body,
-    const std::string& sender,
-    const std::string& recipient
-) {
-    HttpResponse response;
-
-    CURL* curl =
-        curl_easy_init();
-
-    if (curl == nullptr) {
-
-        std::cout
-            << "[CURL] Failed to initialize libcurl"
-            << std::endl;
-
-        return response;
-    }
-
-    std::string url =
-        scheme +
-        "://" +
-        host +
-        ":" +
-        std::to_string(port);
-
-    if (!path.empty()) {
-        url += path;
-    }
-
-    std::string responseBody;
-    std::string responseHeaders;
-
-    configureCommonOptions(
-        curl,
-        url,
-        responseBody,
-        responseHeaders
-    );
-
-    configureCredentials(
-        curl,
-        username,
-        password
-    );
-
-    // Список SMTP отримувачів.
-    struct curl_slist* recipients =
-        nullptr;
-
-    // Дані SMTP повідомлення.
-    std::string message;
-
-    // HTTP.
-    if (isHttp(scheme)) {
-
-        configureHttp(
-            curl,
-            method,
-            body
-        );
-    }
-
-    // HTTPS.
-    else if (isHttps(scheme)) {
-
-        configureHttps(
-            curl,
-            method,
-            body
-        );
-    }
-
-    // FTP.
-    else if (isFtp(scheme)) {
-
-        configureFtp(
-            curl
-        );
-    }
-
-    // SMTP.
-    else if (isSmtp(scheme)) {
-
-        message =
-            "From: " +
-            sender +
-            "\r\n"
-            "To: " +
-            recipient +
-            "\r\n"
-            "Subject: Caching Proxy\r\n"
-            "\r\n" +
-            body +
-            "\r\n";
-
+    if (scheme == "http") {
+        configureHttp(curl, method, body);
+    } else if (scheme == "https") {
+        configureHttps(curl, method, body);
+    } else if (scheme == "ftp") {
+        configureFtp(curl, method, path);
+    } else if (scheme == "smtp") {
         configureSmtp(
             curl,
             sender,
             recipient,
-            message,
-            recipients
+            &recipients
         );
-
-        std::cout
-            << "[CURL] SMTP connection configured"
-            << std::endl;
-    }
-
-    // SMTPS.
-    else if (isSmtps(scheme)) {
-
-        message =
-            "From: " +
-            sender +
-            "\r\n"
-            "To: " +
-            recipient +
-            "\r\n"
-            "Subject: Caching Proxy\r\n"
-            "\r\n" +
-            body +
-            "\r\n";
-
-        configureSmtp(
-            curl,
-            sender,
-            recipient,
-            message,
-            recipients
-        );
-
+    } else if (scheme == "smtps") {
         configureSmtps(
-            curl
+            curl,
+            sender,
+            recipient,
+            &recipients
+        );
+    } else {
+        curl_easy_cleanup(curl);
+        return result;
+    }
+
+    if (isSmtpProtocol(scheme)) {
+        upload.message =
+            "To: " + recipient + "\r\n"
+            "From: " + sender + "\r\n"
+            "Subject: Caching Proxy\r\n"
+            "\r\n" +
+            body +
+            "\r\n";
+
+        curl_easy_setopt(
+            curl,
+            CURLOPT_UPLOAD,
+            1L
         );
 
-        std::cout
-            << "[CURL] SMTPS connection configured"
-            << std::endl;
-    }
+        curl_easy_setopt(
+            curl,
+            CURLOPT_READFUNCTION,
+            readBodyCallback
+        );
 
-    // Протокол не підтримується.
-    else {
+        curl_easy_setopt(
+            curl,
+            CURLOPT_READDATA,
+            &upload
+        );
 
-        std::cout
-            << "[CURL] Unsupported protocol: "
-            << scheme
-            << std::endl;
-
-        curl_easy_cleanup(curl);
-
-        return {};
-    }
-
-    CURLcode result =
-        curl_easy_perform(curl);
-
-    // Звільняємо список отримувачів.
-    if (recipients != nullptr) {
-
-        curl_slist_free_all(
-            recipients
+        curl_easy_setopt(
+            curl,
+            CURLOPT_INFILESIZE_LARGE,
+            static_cast<curl_off_t>(
+                upload.message.size()
+            )
         );
     }
 
-    if (result != CURLE_OK) {
+    const CURLcode curlResult = curl_easy_perform(curl);
 
-        std::cout
-            << "[CURL] Protocol: "
-            << scheme
-            << std::endl;
 
-        std::cout
-            << "[CURL] Error code: "
-            << static_cast<int>(result)
-            << std::endl;
-
-        std::cout
-            << "[CURL] Error: "
-            << curl_easy_strerror(result)
-            << std::endl;
-
-        curl_easy_cleanup(curl);
-
-        return {};
-    }
-
-    long statusCode = 0;
+if (curlResult == CURLE_OK) {
+    long responseCode = 0;
 
     curl_easy_getinfo(
         curl,
         CURLINFO_RESPONSE_CODE,
-        &statusCode
+        &responseCode
     );
 
-   response.statusCode = static_cast<int>(statusCode);
+    result.statusCode =
+        static_cast<int>(responseCode);
 
-    response.headers = responseHeaders;
+    result.body = std::move(response.body);
 
-    response.body = responseBody;
-
-    std::cout << "[CURL] Response body: " << response.body << std::endl;
-    std::cout << "[CURL] Response headers:" << std::endl;
-    std::cout << response.headers << std::endl;
-
-    // FTP не має HTTP status code.
-    if (isFtp(scheme)) {
-
-        response.statusCode = 200;
-
-        response.headers.clear();
+    if (isHttpProtocol(scheme)) {
+        result.headers = normalizeHttpHeaders(
+            response.headers,
+            result.body.size()
+        );
+    } else if (
+        scheme == "ftp" ||
+        scheme == "smtp" ||
+        scheme == "smtps"
+    ) {
+        result.statusCode = 200;
+        result.headers.clear();
+    } else {
+        result.headers = std::move(response.headers);
     }
+} else {
+    std::cerr << "[CURL] Error: "
+              << curl_easy_strerror(curlResult)
+              << '\n';
+}
 
-    // SMTP використовує власні коди,
-    // тому для Proxy повертаємо HTTP 200.
-    if (isSmtp(scheme) ||
-        isSmtps(scheme)) {
+curl_slist_free_all(recipients);
+curl_easy_cleanup(curl);
 
-        response.statusCode = 200;
-
-        response.headers.clear();
-    }
-
-    std::cout
-        << "[CURL] Protocol: "
-        << scheme
-        << std::endl;
-
-    std::cout
-        << "[CURL] Status: "
-        << response.statusCode
-        << std::endl;
-
-    std::cout
-        << "[CURL] Response size: "
-        << response.body.size()
-        << " bytes"
-        << std::endl;
-
-    curl_easy_cleanup(curl);
-
-    return response;
+return result;
 }

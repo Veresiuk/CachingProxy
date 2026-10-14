@@ -17,6 +17,9 @@ add_executable(CachingProxy
     src/http_client.cpp
     src/curl_transport.cpp 
     src/request.cpp
+    src/protocols/http_transport.cpp
+    src/protocols/ftp_transport.cpp
+    src/protocols/smtp_transport.cpp
 )
 
 add_executable(CurlDiagnostic

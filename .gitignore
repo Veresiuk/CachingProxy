@@ -3,3 +3,4 @@ build/
 *.exe
 post.json
 test.json
+certs/
